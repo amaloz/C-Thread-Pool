@@ -7,9 +7,9 @@
 #ifndef _THPOOL_
 #define _THPOOL_
 
-
-
-
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* =================================== API ======================================= */
 
@@ -158,7 +158,8 @@ void thpool_resume(threadpool);
  */
 void thpool_destroy(threadpool);
 
-
-
+#ifdef __cplusplus
+}
+#endif
 
 #endif
