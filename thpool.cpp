@@ -203,19 +203,9 @@ int
 thpool_add_tag(thpool_ *thpool_p, char *tag, int length,
                void * (fn)(void *arg), void *arg)
 {
-    /* fprintf(stderr, "ADDING TAG %s OF LENGTH %d...\n", tag, length); */
+    // fprintf(stderr, "ADDING TAG %s OF LENGTH %d...\n", tag, length);
 
     // pthread_mutex_lock(&thpool_p->tlist->lock);
-    for (int i = 0; i < thpool_p->tlist->num; ++i) {
-        if (thpool_p->tlist->tags[i].name == NULL)
-            continue;
-        if (strcmp(thpool_p->tlist->tags[i].name, tag) == 0) {
-            fprintf(stderr, "thpool_add_tag(): tag already in tag list\n");
-            pthread_mutex_unlock(&thpool_p->tlist->lock);
-            return -1;
-        }
-    }
-
     for (int i = 0; i < thpool_p->tlist->num; ++i) {
         struct tag *t = &thpool_p->tlist->tags[i];
         if (t->name == NULL) {
@@ -225,12 +215,18 @@ thpool_add_tag(thpool_ *thpool_p, char *tag, int length,
             t->function = fn;
             t->arg = arg;
             // pthread_mutex_unlock(&thpool_p->tlist->lock);
+            // fprintf(stderr, "ADDED TAG %s OF LENGTH %d...\n", t->name, length);
             return 0;
+        } else if (strcmp(tag, t->name) == 0) {
+            fprintf(stderr, "thpool_add_tag(): tag '%s' already in tag list\n", tag);
+            // pthread_mutex_unlock(&thpool_p->tlist->lock);
+            return -1;
         }
     }
 
     fprintf(stderr, "thpool_add_tag(): tag list full!\n");
     assert(0);
+    pthread_mutex_unlock(&thpool_p->tlist->lock);
     return -1;
 }
 
@@ -240,18 +236,20 @@ tag_decrement(thpool_ *thpool_p, char *tag)
 {
 
     // pthread_mutex_lock(&thpool_p->tlist->lock);
-    /* fprintf(stderr, "DECREMENTING TAG %s...\n", tag); */
+    // fprintf(stderr, "DECREMENTING TAG %s...\n", tag);
 
     for (int i = 0; i < thpool_p->tlist->num; ++i) {
         struct tag *t = &thpool_p->tlist->tags[i];
         if (strcmp(t->name, tag) == 0) {
             t->len--;
-            /* fprintf(stderr, "DECREMENTING TAG %s TO %d\n", tag, c->len); */
+            // fprintf(stderr, "DECREMENTING TAG %s TO %d\n", tag, t->len);
             assert(t->len >= 0);
             if (t->len == 0) {
                 t->function(t->arg);
-                free(t->name);
-                /* XXX: setting t->name = NULL breaks everything... why? */
+                // free(t->name);
+                // t->name = NULL;
+                // t->function = NULL;
+                // t->arg = NULL;
             }
             // pthread_mutex_unlock(&thpool_p->tlist->lock);
             return 0;
@@ -304,7 +302,7 @@ thpool_wait(thpool_* thpool_p)
 	while (tpassed < timeout && 
 			(thpool_p->jobqueue_p->len || thpool_p->num_threads_working))
 	{
-		time (&end);
+		time(&end);
 		tpassed = difftime(end,start);
 	}
 
