@@ -83,8 +83,9 @@ typedef struct taglist_ {
     tag *tags;
 } taglist;
 
-#define CLIST_SIZE 20
-
+// XXX: We don't clear the tag list, so if we have more than 1024 tags all hell
+// breaks loose!
+#define TAGLIST_SIZE 1024
 
 /* Threadpool */
 typedef struct thpool_{
@@ -170,7 +171,7 @@ thpool_init(int num_threads)
 		free(thpool_p);
         return NULL;
     }
-    tlist->num = CLIST_SIZE;
+    tlist->num = TAGLIST_SIZE;
     tlist->tags = (tag *) calloc(tlist->num, sizeof(tag));
     if (tlist->tags == NULL) {
         fprintf(stderr, "thpool_init(): Could not allocate memory for tag list\n");
@@ -203,9 +204,6 @@ int
 thpool_add_tag(thpool_ *thpool_p, char *tag, int length,
                void * (fn)(void *arg), void *arg)
 {
-    // fprintf(stderr, "ADDING TAG %s OF LENGTH %d...\n", tag, length);
-
-    // pthread_mutex_lock(&thpool_p->tlist->lock);
     for (int i = 0; i < thpool_p->tlist->num; ++i) {
         struct tag *t = &thpool_p->tlist->tags[i];
         if (t->name == NULL) {
@@ -214,19 +212,15 @@ thpool_add_tag(thpool_ *thpool_p, char *tag, int length,
             t->len = length;
             t->function = fn;
             t->arg = arg;
-            // pthread_mutex_unlock(&thpool_p->tlist->lock);
-            // fprintf(stderr, "ADDED TAG %s OF LENGTH %d...\n", t->name, length);
             return 0;
         } else if (strcmp(tag, t->name) == 0) {
             fprintf(stderr, "thpool_add_tag(): tag '%s' already in tag list\n", tag);
-            // pthread_mutex_unlock(&thpool_p->tlist->lock);
             return -1;
         }
     }
 
     fprintf(stderr, "thpool_add_tag(): tag list full!\n");
     assert(0);
-    pthread_mutex_unlock(&thpool_p->tlist->lock);
     return -1;
 }
 
@@ -235,29 +229,19 @@ static int
 tag_decrement(thpool_ *thpool_p, char *tag)
 {
 
-    // pthread_mutex_lock(&thpool_p->tlist->lock);
-    // fprintf(stderr, "DECREMENTING TAG %s...\n", tag);
-
     for (int i = 0; i < thpool_p->tlist->num; ++i) {
         struct tag *t = &thpool_p->tlist->tags[i];
         if (strcmp(t->name, tag) == 0) {
             t->len--;
-            // fprintf(stderr, "DECREMENTING TAG %s TO %d\n", tag, t->len);
             assert(t->len >= 0);
             if (t->len == 0) {
                 t->function(t->arg);
-                // free(t->name);
-                // t->name = NULL;
-                // t->function = NULL;
-                // t->arg = NULL;
             }
-            // pthread_mutex_unlock(&thpool_p->tlist->lock);
             return 0;
         }
     }
     fprintf(stderr, "tag_decrement(): tag does not exist in tag list\n");
     assert(0);
-    // pthread_mutex_unlock(&thpool_p->tlist->lock);
     return -1;
 }
 
