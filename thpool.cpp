@@ -49,7 +49,7 @@ typedef struct job {
 	struct job*  prev;                   /* pointer to previous job   */
 	void*  (*function)(void* arg);       /* function pointer          */
 	void*  arg;                          /* function's argument       */
-    char *class;
+    char *tag;
 } job;
 
 
@@ -70,18 +70,18 @@ typedef struct thread{
 	struct thpool_* thpool_p;            /* access to thpool          */
 } thread;
 
-typedef struct class_ {
+typedef struct tag {
     char *name;
     int len;
     void * (*function)(void *arg);
     void *arg;
-} class_;
+} tag;
 
-typedef struct classlist_ {
+typedef struct taglist_ {
     int num;
     pthread_mutex_t lock;
-    class_ *classes;
-} classlist;
+    tag *tags;
+} taglist;
 
 #define CLIST_SIZE 20
 
@@ -93,7 +93,7 @@ typedef struct thpool_{
 	volatile int num_threads_working;    /* threads currently working */
 	pthread_mutex_t  thcount_lock;       /* used for thread count etc */
 	jobqueue*  jobqueue_p;               /* pointer to the job queue  */
-    classlist* clist;
+    taglist* tlist;
 } thpool_;
 
 
@@ -101,8 +101,8 @@ typedef struct thpool_{
 
 
 static void  thread_init(thpool_* thpool_p, struct thread** thread_p, int id);
-static void* thread_do(struct thread* thread_p);
-static void  thread_hold();
+static void* thread_do(void *arg);
+static void  thread_hold(int);
 static void  thread_destroy(struct thread* thread_p);
 
 static int   jobqueue_init(thpool_* thpool_p);
@@ -159,10 +159,10 @@ thpool_init(int num_threads)
 		return NULL;
 	}
 
-    /* Make class list */
-    classlist *clist;
-    clist = (classlist *) malloc(sizeof(classlist));
-    if (clist == NULL) {
+    /* Make tag list */
+    taglist *tlist;
+    tlist = (taglist *) malloc(sizeof(taglist));
+    if (tlist == NULL) {
         fprintf(stderr, "thpool_init(): Could not allocate memory for job queue\n");
 		jobqueue_destroy(thpool_p);
 		free(thpool_p->jobqueue_p);
@@ -170,19 +170,19 @@ thpool_init(int num_threads)
 		free(thpool_p);
         return NULL;
     }
-    clist->num = CLIST_SIZE;
-    clist->classes = (class_ *) calloc(clist->num, sizeof(class_));
-    if (clist->classes == NULL) {
-        fprintf(stderr, "thpool_init(): Could not allocate memory for class list\n");
+    tlist->num = CLIST_SIZE;
+    tlist->tags = (tag *) calloc(tlist->num, sizeof(tag));
+    if (tlist->tags == NULL) {
+        fprintf(stderr, "thpool_init(): Could not allocate memory for tag list\n");
 		jobqueue_destroy(thpool_p);
 		free(thpool_p->jobqueue_p);
         free(thpool_p->threads);
 		free(thpool_p);
-        free(clist);
+        free(tlist);
         return NULL;
     }
-    pthread_mutex_init(&clist->lock, NULL);
-    thpool_p->clist = clist;
+    pthread_mutex_init(&tlist->lock, NULL);
+    thpool_p->tlist = tlist;
 
 	pthread_mutex_init(&(thpool_p->thcount_lock), NULL);
 	
@@ -200,31 +200,31 @@ thpool_init(int num_threads)
 }
 
 int
-thpool_add_class(thpool_ *thpool_p, char *class, int length,
-                 void * (fn)(void *arg), void *arg)
+thpool_add_tag(thpool_ *thpool_p, char *tag, int length,
+               void * (fn)(void *arg), void *arg)
 {
-    /* fprintf(stderr, "ADDING CLASS %s OF LENGTH %d...\n", class, length); */
+    /* fprintf(stderr, "ADDING TAG %s OF LENGTH %d...\n", tag, length); */
 
-    pthread_mutex_lock(&thpool_p->clist->lock);
-    for (int i = 0; i < thpool_p->clist->num; ++i) {
-        if (thpool_p->clist->classes[i].name == NULL)
+    pthread_mutex_lock(&thpool_p->tlist->lock);
+    for (int i = 0; i < thpool_p->tlist->num; ++i) {
+        if (thpool_p->tlist->tags[i].name == NULL)
             continue;
-        if (strcmp(thpool_p->clist->classes[i].name, class) == 0) {
+        if (strcmp(thpool_p->tlist->tags[i].name, tag) == 0) {
             fprintf(stderr, "thpool_add_class(): class already in class list\n");
-            pthread_mutex_unlock(&thpool_p->clist->lock);
+            pthread_mutex_unlock(&thpool_p->tlist->lock);
             return -1;
         }
     }
 
-    for (int i = 0; i < thpool_p->clist->num; ++i) {
-        class_ *c = &thpool_p->clist->classes[i];
-        if (c->name == NULL) {
-            c->name = calloc(strlen(class) + 1, sizeof(char));
-            (void) strcpy(c->name, class);
-            c->len = length;
-            c->function = fn;
-            c->arg = arg;
-            pthread_mutex_unlock(&thpool_p->clist->lock);
+    for (int i = 0; i < thpool_p->tlist->num; ++i) {
+        struct tag *t = &thpool_p->tlist->tags[i];
+        if (t->name == NULL) {
+            t->name = (char *) calloc(strlen(tag) + 1, sizeof(char));
+            (void) strcpy(t->name, tag);
+            t->len = length;
+            t->function = fn;
+            t->arg = arg;
+            pthread_mutex_unlock(&thpool_p->tlist->lock);
             return 0;
         }
     }
@@ -236,30 +236,30 @@ thpool_add_class(thpool_ *thpool_p, char *class, int length,
 
 
 static int
-class_decrement(thpool_ *thpool_p, char *class)
+tag_decrement(thpool_ *thpool_p, char *tag)
 {
 
-    pthread_mutex_lock(&thpool_p->clist->lock);
-    /* fprintf(stderr, "DECREMENTING CLASS %s...\n", class); */
+    pthread_mutex_lock(&thpool_p->tlist->lock);
+    /* fprintf(stderr, "DECREMENTING TAG %s...\n", tag); */
 
-    for (int i = 0; i < thpool_p->clist->num; ++i) {
-        class_ *c = &thpool_p->clist->classes[i];
-        if (strcmp(c->name, class) == 0) {
-            c->len--;
-            /* fprintf(stderr, "DECREMENTING CLASS %s TO %d\n", class, c->len); */
-            assert(c->len >= 0);
-            if (c->len == 0) {
-                c->function(c->arg);
-                free(c->name);
-                /* XXX: setting c->name = NULL breaks everything... why? */
+    for (int i = 0; i < thpool_p->tlist->num; ++i) {
+        struct tag *t = &thpool_p->tlist->tags[i];
+        if (strcmp(t->name, tag) == 0) {
+            t->len--;
+            /* fprintf(stderr, "DECREMENTING TAG %s TO %d\n", tag, c->len); */
+            assert(t->len >= 0);
+            if (t->len == 0) {
+                t->function(t->arg);
+                free(t->name);
+                /* XXX: setting t->name = NULL breaks everything... why? */
             }
-            pthread_mutex_unlock(&thpool_p->clist->lock);
+            pthread_mutex_unlock(&thpool_p->tlist->lock);
             return 0;
         }
     }
-    fprintf(stderr, "class_decrement(): class does not exist in class list\n");
+    fprintf(stderr, "tag_decrement(): tag does not exist in class list\n");
     assert(0);
-    pthread_mutex_unlock(&thpool_p->clist->lock);
+    pthread_mutex_unlock(&thpool_p->tlist->lock);
     return -1;
 }
 
@@ -280,8 +280,8 @@ thpool_add_work(thpool_* thpool_p, void *(*function_p)(void*), void* arg_p,
 	/* add function and argument */
 	newjob->function = function_p;
 	newjob->arg = arg_p;
-    newjob->class = (char *) calloc(strlen(class_) + 1, sizeof(char));
-    (void) strcpy(newjob->class, class_);
+    newjob->tag = (char *) calloc(strlen(class_) + 1, sizeof(char));
+    (void) strcpy(newjob->tag, class_);
 
 	/* add job to queue */
 	pthread_mutex_lock(&thpool_p->jobqueue_p->rwmutex);
@@ -414,14 +414,16 @@ static void thread_init (thpool_* thpool_p, struct thread** thread_p, int id){
 	(*thread_p)->thpool_p = thpool_p;
 	(*thread_p)->id       = id;
 
-	pthread_create(&(*thread_p)->pthread, NULL, (void *)thread_do, (*thread_p));
+	pthread_create(&(*thread_p)->pthread, NULL, thread_do, (*thread_p));
 	pthread_detach((*thread_p)->pthread);
 	
 }
 
 
 /* Sets the calling thread on hold */
-static void thread_hold () {
+static void
+thread_hold (int num)
+{
 	threads_on_hold = 1;
 	while (threads_on_hold){
 		sleep(1);
@@ -438,8 +440,9 @@ static void thread_hold () {
 * @return nothing
 */
 static void *
-thread_do(struct thread *thread_p)
+thread_do(void *arg)
 {
+    struct thread *thread_p = (struct thread *) arg;
 
 	/* Assure all threads have been created before starting serving */
 	thpool_ *thpool_p = thread_p->thpool_p;
@@ -477,8 +480,8 @@ thread_do(struct thread *thread_p)
 				func_buff = job_p->function;
 				arg_buff  = job_p->arg;
 				func_buff(arg_buff);
-                class_decrement(thpool_p, job_p->class);
-                free(job_p->class);
+                tag_decrement(thpool_p, job_p->tag);
+                free(job_p->tag);
 				free(job_p);
 			}
 			

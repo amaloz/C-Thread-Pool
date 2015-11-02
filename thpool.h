@@ -38,8 +38,8 @@ threadpool thpool_init(int num_threads);
 
 
 int
-thpool_add_class(threadpool thpool_p, char *class_, int length,
-                 void * (fn)(void *arg), void *arg);
+thpool_add_tag(threadpool thpool_p, char *tag, int length,
+               void * (fn)(void *arg), void *arg);
 
 
 /**
