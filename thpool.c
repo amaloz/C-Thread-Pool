@@ -83,6 +83,8 @@ typedef struct classlist_ {
     class_ *classes;
 } classlist;
 
+#define CLIST_SIZE 20
+
 
 /* Threadpool */
 typedef struct thpool_{
@@ -120,19 +122,20 @@ static void  bsem_wait(struct bsem *bsem_p);
 
 
 /* Initialise thread pool */
-struct thpool_* thpool_init(int num_threads){
-
+struct thpool_*
+thpool_init(int num_threads)
+{
 	threads_on_hold   = 0;
 	threads_keepalive = 1;
 
-	if ( num_threads < 0){
+	if (num_threads < 0) {
 		num_threads = 0;
 	}
 
 	/* Make new thread pool */
 	thpool_* thpool_p;
 	thpool_p = (struct thpool_*)malloc(sizeof(struct thpool_));
-	if (thpool_p == NULL){
+	if (thpool_p == NULL) {
 		fprintf(stderr, "thpool_init(): Could not allocate memory for thread pool\n");
 		return NULL;
 	}
@@ -140,7 +143,7 @@ struct thpool_* thpool_init(int num_threads){
 	thpool_p->num_threads_working = 0;
 
 	/* Initialise the job queue */
-	if (jobqueue_init(thpool_p) == -1){
+	if (jobqueue_init(thpool_p) == -1) {
 		fprintf(stderr, "thpool_init(): Could not allocate memory for job queue\n");
 		free(thpool_p);
 		return NULL;
@@ -159,14 +162,25 @@ struct thpool_* thpool_init(int num_threads){
     /* Make class list */
     classlist *clist;
     clist = (classlist *) malloc(sizeof(classlist));
-    if (clist == NULL){
+    if (clist == NULL) {
         fprintf(stderr, "thpool_init(): Could not allocate memory for job queue\n");
-        /* TODO: cleanup */
+		jobqueue_destroy(thpool_p);
+		free(thpool_p->jobqueue_p);
+        free(thpool_p->threads);
+		free(thpool_p);
         return NULL;
     }
-    clist->num = 20;
+    clist->num = CLIST_SIZE;
     clist->classes = (class_ *) calloc(clist->num, sizeof(class_));
-    /* TODO: check */
+    if (clist->classes == NULL) {
+        fprintf(stderr, "thpool_init(): Could not allocate memory for class list\n");
+		jobqueue_destroy(thpool_p);
+		free(thpool_p->jobqueue_p);
+        free(thpool_p->threads);
+		free(thpool_p);
+        free(clist);
+        return NULL;
+    }
     pthread_mutex_init(&clist->lock, NULL);
     thpool_p->clist = clist;
 
@@ -233,6 +247,7 @@ class_decrement(thpool_ *thpool_p, char *class)
         if (strcmp(c->name, class) == 0) {
             c->len--;
             /* fprintf(stderr, "DECREMENTING CLASS %s TO %d\n", class, c->len); */
+            assert(c->len >= 0);
             if (c->len == 0) {
                 c->function(c->arg);
                 free(c->name);
@@ -265,7 +280,8 @@ thpool_add_work(thpool_* thpool_p, void *(*function_p)(void*), void* arg_p,
 	/* add function and argument */
 	newjob->function = function_p;
 	newjob->arg = arg_p;
-    newjob->class = class_;
+    newjob->class = (char *) calloc(strlen(class_) + 1, sizeof(char));
+    (void) strcpy(newjob->class, class_);
 
 	/* add job to queue */
 	pthread_mutex_lock(&thpool_p->jobqueue_p->rwmutex);
@@ -462,6 +478,7 @@ thread_do(struct thread *thread_p)
 				arg_buff  = job_p->arg;
 				func_buff(arg_buff);
                 class_decrement(thpool_p, job_p->class);
+                free(job_p->class);
 				free(job_p);
 			}
 			
