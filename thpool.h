@@ -37,6 +37,11 @@ typedef struct thpool_* threadpool;
 threadpool thpool_init(int num_threads);
 
 
+int
+thpool_add_class(threadpool thpool_p, char *class_, int length,
+                 void * (fn)(void *arg), void *arg);
+
+
 /**
  * @brief Add work to the job queue
  * 
@@ -64,7 +69,8 @@ threadpool thpool_init(int num_threads);
  * @param  arg_p         pointer to an argument
  * @return nothing
  */
-int thpool_add_work(threadpool, void *(*function_p)(void*), void* arg_p);
+int thpool_add_work(threadpool, void *(*function_p)(void*), void* arg_p,
+                    char *class_);
 
 
 /**

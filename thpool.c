@@ -8,11 +8,12 @@
  * 
  ********************************/
 
-
+#include <assert.h>
 #include <unistd.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 #include <errno.h>
 #include <time.h> 
@@ -32,9 +33,6 @@ static volatile int threads_keepalive;
 static volatile int threads_on_hold;
 
 
-
-
-
 /* ========================== STRUCTURES ============================ */
 
 
@@ -47,10 +45,11 @@ typedef struct bsem {
 
 
 /* Job */
-typedef struct job{
+typedef struct job {
 	struct job*  prev;                   /* pointer to previous job   */
 	void*  (*function)(void* arg);       /* function pointer          */
 	void*  arg;                          /* function's argument       */
+    char *class;
 } job;
 
 
@@ -71,6 +70,19 @@ typedef struct thread{
 	struct thpool_* thpool_p;            /* access to thpool          */
 } thread;
 
+typedef struct class_ {
+    char *name;
+    int len;
+    void * (*function)(void *arg);
+    void *arg;
+} class_;
+
+typedef struct classlist_ {
+    int num;
+    pthread_mutex_t lock;
+    class_ *classes;
+} classlist;
+
 
 /* Threadpool */
 typedef struct thpool_{
@@ -78,11 +90,9 @@ typedef struct thpool_{
 	volatile int num_threads_alive;      /* threads currently alive   */
 	volatile int num_threads_working;    /* threads currently working */
 	pthread_mutex_t  thcount_lock;       /* used for thread count etc */
-	jobqueue*  jobqueue_p;               /* pointer to the job queue  */    
+	jobqueue*  jobqueue_p;               /* pointer to the job queue  */
+    classlist* clist;
 } thpool_;
-
-
-
 
 
 /* ========================== PROTOTYPES ============================ */
@@ -104,9 +114,6 @@ static void  bsem_reset(struct bsem *bsem_p);
 static void  bsem_post(struct bsem *bsem_p);
 static void  bsem_post_all(struct bsem *bsem_p);
 static void  bsem_wait(struct bsem *bsem_p);
-
-
-
 
 
 /* ========================== THREADPOOL ============================ */
@@ -149,11 +156,24 @@ struct thpool_* thpool_init(int num_threads){
 		return NULL;
 	}
 
+    /* Make class list */
+    classlist *clist;
+    clist = (classlist *) malloc(sizeof(classlist));
+    if (clist == NULL){
+        fprintf(stderr, "thpool_init(): Could not allocate memory for job queue\n");
+        /* TODO: cleanup */
+        return NULL;
+    }
+    clist->num = 20;
+    clist->classes = (class_ *) calloc(clist->num, sizeof(class_));
+    /* TODO: check */
+    pthread_mutex_init(&clist->lock, NULL);
+    thpool_p->clist = clist;
+
 	pthread_mutex_init(&(thpool_p->thcount_lock), NULL);
 	
 	/* Thread init */
-	int n;
-	for (n=0; n<num_threads; n++){
+	for (int n = 0; n < num_threads; n++) {
 		thread_init(thpool_p, &thpool_p->threads[n], n);
 		if (THPOOL_DEBUG)
 			printf("THPOOL_DEBUG: Created thread %d in pool \n", n);
@@ -165,20 +185,87 @@ struct thpool_* thpool_init(int num_threads){
 	return thpool_p;
 }
 
+int
+thpool_add_class(thpool_ *thpool_p, char *class, int length,
+                 void * (fn)(void *arg), void *arg)
+{
+    /* fprintf(stderr, "ADDING CLASS %s OF LENGTH %d...\n", class, length); */
+
+    pthread_mutex_lock(&thpool_p->clist->lock);
+    for (int i = 0; i < thpool_p->clist->num; ++i) {
+        if (thpool_p->clist->classes[i].name == NULL)
+            continue;
+        if (strcmp(thpool_p->clist->classes[i].name, class) == 0) {
+            fprintf(stderr, "thpool_add_class(): class already in class list\n");
+            pthread_mutex_unlock(&thpool_p->clist->lock);
+            return -1;
+        }
+    }
+
+    for (int i = 0; i < thpool_p->clist->num; ++i) {
+        class_ *c = &thpool_p->clist->classes[i];
+        if (c->name == NULL) {
+            c->name = calloc(strlen(class) + 1, sizeof(char));
+            (void) strcpy(c->name, class);
+            c->len = length;
+            c->function = fn;
+            c->arg = arg;
+            pthread_mutex_unlock(&thpool_p->clist->lock);
+            return 0;
+        }
+    }
+
+    fprintf(stderr, "thpool_add_class(): class list full!\n");
+    assert(0);
+    return -1;
+}
+
+
+static int
+class_decrement(thpool_ *thpool_p, char *class)
+{
+
+    pthread_mutex_lock(&thpool_p->clist->lock);
+    /* fprintf(stderr, "DECREMENTING CLASS %s...\n", class); */
+
+    for (int i = 0; i < thpool_p->clist->num; ++i) {
+        class_ *c = &thpool_p->clist->classes[i];
+        if (strcmp(c->name, class) == 0) {
+            c->len--;
+            /* fprintf(stderr, "DECREMENTING CLASS %s TO %d\n", class, c->len); */
+            if (c->len == 0) {
+                c->function(c->arg);
+                free(c->name);
+                /* XXX: setting c->name = NULL breaks everything... why? */
+            }
+            pthread_mutex_unlock(&thpool_p->clist->lock);
+            return 0;
+        }
+    }
+    fprintf(stderr, "class_decrement(): class does not exist in class list\n");
+    assert(0);
+    pthread_mutex_unlock(&thpool_p->clist->lock);
+    return -1;
+}
+
 
 /* Add work to the thread pool */
-int thpool_add_work(thpool_* thpool_p, void *(*function_p)(void*), void* arg_p){
-	job* newjob;
+int
+thpool_add_work(thpool_* thpool_p, void *(*function_p)(void*), void* arg_p,
+                char *class_)
+{
+	job *newjob;
 
-	newjob=(struct job*)malloc(sizeof(struct job));
-	if (newjob==NULL){
+	newjob = (struct job*) malloc(sizeof(struct job));
+	if (newjob == NULL) {
 		fprintf(stderr, "thpool_add_work(): Could not allocate memory for new job\n");
 		return -1;
 	}
 
 	/* add function and argument */
-	newjob->function=function_p;
-	newjob->arg=arg_p;
+	newjob->function = function_p;
+	newjob->arg = arg_p;
+    newjob->class = class_;
 
 	/* add job to queue */
 	pthread_mutex_lock(&thpool_p->jobqueue_p->rwmutex);
@@ -334,10 +421,12 @@ static void thread_hold () {
 * @param  thread        thread that will run this function
 * @return nothing
 */
-static void* thread_do(struct thread* thread_p){
+static void *
+thread_do(struct thread *thread_p)
+{
 
 	/* Assure all threads have been created before starting serving */
-	thpool_* thpool_p = thread_p->thpool_p;
+	thpool_ *thpool_p = thread_p->thpool_p;
 	
 	/* Register signal handler */
 	struct sigaction act;
@@ -351,11 +440,11 @@ static void* thread_do(struct thread* thread_p){
 	thpool_p->num_threads_alive += 1;
 	pthread_mutex_unlock(&thpool_p->thcount_lock);
 
-	while(threads_keepalive){
+	while(threads_keepalive) {
 
 		bsem_wait(thpool_p->jobqueue_p->has_jobs);
 
-		if (threads_keepalive){
+		if (threads_keepalive) {
 			
 			pthread_mutex_lock(&thpool_p->thcount_lock);
 			thpool_p->num_threads_working++;
@@ -372,6 +461,7 @@ static void* thread_do(struct thread* thread_p){
 				func_buff = job_p->function;
 				arg_buff  = job_p->arg;
 				func_buff(arg_buff);
+                class_decrement(thpool_p, job_p->class);
 				free(job_p);
 			}
 			
@@ -469,27 +559,28 @@ static void jobqueue_push(thpool_* thpool_p, struct job* newjob){
  * 
  * Notice: Caller MUST hold a mutex
  */
-static struct job* jobqueue_pull(thpool_* thpool_p){
-
-	job* job_p;
+static struct job *
+jobqueue_pull(thpool_ *thpool_p)
+{
+	job *job_p;
 	job_p = thpool_p->jobqueue_p->front;
 
-	switch(thpool_p->jobqueue_p->len){
+	switch(thpool_p->jobqueue_p->len) {
 		
-		case 0:  /* if no jobs in queue */
-		  			break;
+    case 0:  /* if no jobs in queue */
+        break;
 		
-		case 1:  /* if one job in queue */
-					thpool_p->jobqueue_p->front = NULL;
-					thpool_p->jobqueue_p->rear  = NULL;
-					thpool_p->jobqueue_p->len = 0;
-					break;
+    case 1:  /* if one job in queue */
+        thpool_p->jobqueue_p->front = NULL;
+        thpool_p->jobqueue_p->rear  = NULL;
+        thpool_p->jobqueue_p->len = 0;
+        break;
 		
-		default: /* if >1 jobs in queue */
-					thpool_p->jobqueue_p->front = job_p->prev;
-					thpool_p->jobqueue_p->len--;
-					/* more than one job in queue -> post it */
-					bsem_post(thpool_p->jobqueue_p->has_jobs);
+    default: /* if >1 jobs in queue */
+        thpool_p->jobqueue_p->front = job_p->prev;
+        thpool_p->jobqueue_p->len--;
+        /* more than one job in queue -> post it */
+        bsem_post(thpool_p->jobqueue_p->has_jobs);
 					
 	}
 	
@@ -502,9 +593,6 @@ static void jobqueue_destroy(thpool_* thpool_p){
 	jobqueue_clear(thpool_p);
 	free(thpool_p->jobqueue_p->has_jobs);
 }
-
-
-
 
 
 /* ======================== SYNCHRONISATION ========================= */
