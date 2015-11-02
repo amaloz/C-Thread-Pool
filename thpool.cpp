@@ -205,12 +205,12 @@ thpool_add_tag(thpool_ *thpool_p, char *tag, int length,
 {
     /* fprintf(stderr, "ADDING TAG %s OF LENGTH %d...\n", tag, length); */
 
-    pthread_mutex_lock(&thpool_p->tlist->lock);
+    // pthread_mutex_lock(&thpool_p->tlist->lock);
     for (int i = 0; i < thpool_p->tlist->num; ++i) {
         if (thpool_p->tlist->tags[i].name == NULL)
             continue;
         if (strcmp(thpool_p->tlist->tags[i].name, tag) == 0) {
-            fprintf(stderr, "thpool_add_class(): class already in class list\n");
+            fprintf(stderr, "thpool_add_tag(): tag already in tag list\n");
             pthread_mutex_unlock(&thpool_p->tlist->lock);
             return -1;
         }
@@ -224,12 +224,12 @@ thpool_add_tag(thpool_ *thpool_p, char *tag, int length,
             t->len = length;
             t->function = fn;
             t->arg = arg;
-            pthread_mutex_unlock(&thpool_p->tlist->lock);
+            // pthread_mutex_unlock(&thpool_p->tlist->lock);
             return 0;
         }
     }
 
-    fprintf(stderr, "thpool_add_class(): class list full!\n");
+    fprintf(stderr, "thpool_add_tag(): tag list full!\n");
     assert(0);
     return -1;
 }
@@ -239,7 +239,7 @@ static int
 tag_decrement(thpool_ *thpool_p, char *tag)
 {
 
-    pthread_mutex_lock(&thpool_p->tlist->lock);
+    // pthread_mutex_lock(&thpool_p->tlist->lock);
     /* fprintf(stderr, "DECREMENTING TAG %s...\n", tag); */
 
     for (int i = 0; i < thpool_p->tlist->num; ++i) {
@@ -253,13 +253,13 @@ tag_decrement(thpool_ *thpool_p, char *tag)
                 free(t->name);
                 /* XXX: setting t->name = NULL breaks everything... why? */
             }
-            pthread_mutex_unlock(&thpool_p->tlist->lock);
+            // pthread_mutex_unlock(&thpool_p->tlist->lock);
             return 0;
         }
     }
-    fprintf(stderr, "tag_decrement(): tag does not exist in class list\n");
+    fprintf(stderr, "tag_decrement(): tag does not exist in tag list\n");
     assert(0);
-    pthread_mutex_unlock(&thpool_p->tlist->lock);
+    // pthread_mutex_unlock(&thpool_p->tlist->lock);
     return -1;
 }
 
@@ -267,7 +267,7 @@ tag_decrement(thpool_ *thpool_p, char *tag)
 /* Add work to the thread pool */
 int
 thpool_add_work(thpool_* thpool_p, void *(*function_p)(void*), void* arg_p,
-                char *class_)
+                char *tag)
 {
 	job *newjob;
 
@@ -280,8 +280,8 @@ thpool_add_work(thpool_* thpool_p, void *(*function_p)(void*), void* arg_p,
 	/* add function and argument */
 	newjob->function = function_p;
 	newjob->arg = arg_p;
-    newjob->tag = (char *) calloc(strlen(class_) + 1, sizeof(char));
-    (void) strcpy(newjob->tag, class_);
+    newjob->tag = (char *) calloc(strlen(tag) + 1, sizeof(char));
+    (void) strcpy(newjob->tag, tag);
 
 	/* add job to queue */
 	pthread_mutex_lock(&thpool_p->jobqueue_p->rwmutex);
@@ -293,8 +293,9 @@ thpool_add_work(thpool_* thpool_p, void *(*function_p)(void*), void* arg_p,
 
 
 /* Wait until all jobs have finished */
-void thpool_wait(thpool_* thpool_p){
-
+void
+thpool_wait(thpool_* thpool_p)
+{
 	/* Continuous polling */
 	double timeout = 1.0;
 	time_t start, end;
@@ -338,11 +339,12 @@ void thpool_wait(thpool_* thpool_p){
 
 
 /* Destroy the threadpool */
-void thpool_destroy(thpool_* thpool_p){
-	
+void
+thpool_destroy(thpool_* thpool_p)
+{
 	volatile int threads_total = thpool_p->num_threads_alive;
 
-	/* End each thread 's infinite loop */
+	/* End each thread's infinite loop */
 	threads_keepalive = 0;
 	
 	/* Give one second to kill idle threads */
@@ -377,21 +379,20 @@ void thpool_destroy(thpool_* thpool_p){
 
 
 /* Pause all threads in threadpool */
-void thpool_pause(thpool_* thpool_p) {
-	int n;
-	for (n=0; n < thpool_p->num_threads_alive; n++){
+void
+thpool_pause(thpool_* thpool_p)
+{
+	for (int n = 0; n < thpool_p->num_threads_alive; n++) {
 		pthread_kill(thpool_p->threads[n]->pthread, SIGUSR1);
 	}
 }
 
-
 /* Resume all threads in threadpool */
-void thpool_resume(thpool_* thpool_p) {
+void
+thpool_resume(thpool_* thpool_p)
+{
 	threads_on_hold = 0;
 }
-
-
-
 
 
 /* ============================ THREAD ============================== */
@@ -403,10 +404,11 @@ void thpool_resume(thpool_* thpool_p) {
  * @param id            id to be given to the thread
  * 
  */
-static void thread_init (thpool_* thpool_p, struct thread** thread_p, int id){
-	
-	*thread_p = (struct thread*)malloc(sizeof(struct thread));
-	if (thread_p == NULL){
+static void
+thread_init(thpool_* thpool_p, struct thread** thread_p, int id)
+{
+	*thread_p = (struct thread*) malloc(sizeof(struct thread));
+	if (thread_p == NULL) {
 		fprintf(stderr, "thpool_init(): Could not allocate memory for thread\n");
 		exit(1);
 	}
@@ -425,7 +427,7 @@ static void
 thread_hold (int num)
 {
 	threads_on_hold = 1;
-	while (threads_on_hold){
+	while (threads_on_hold) {
 		sleep(1);
 	}
 }
@@ -433,8 +435,8 @@ thread_hold (int num)
 
 /* What each thread is doing
 * 
-* In principle this is an endless loop. The only time this loop gets interuppted is once
-* thpool_destroy() is invoked or the program exits.
+* In principle this is an endless loop. The only time this loop gets interrupted
+* is once thpool_destroy() is invoked or the program exits.
 * 
 * @param  thread        thread that will run this function
 * @return nothing
@@ -459,27 +461,24 @@ thread_do(void *arg)
 	thpool_p->num_threads_alive += 1;
 	pthread_mutex_unlock(&thpool_p->thcount_lock);
 
-	while(threads_keepalive) {
+	while (threads_keepalive) {
 
 		bsem_wait(thpool_p->jobqueue_p->has_jobs);
 
 		if (threads_keepalive) {
+
+			job* job_p;
 			
 			pthread_mutex_lock(&thpool_p->thcount_lock);
 			thpool_p->num_threads_working++;
 			pthread_mutex_unlock(&thpool_p->thcount_lock);
 			
 			/* Read job from queue and execute it */
-			void*(*func_buff)(void* arg);
-			void*  arg_buff;
-			job* job_p;
 			pthread_mutex_lock(&thpool_p->jobqueue_p->rwmutex);
 			job_p = jobqueue_pull(thpool_p);
 			pthread_mutex_unlock(&thpool_p->jobqueue_p->rwmutex);
 			if (job_p) {
-				func_buff = job_p->function;
-				arg_buff  = job_p->arg;
-				func_buff(arg_buff);
+				job_p->function(job_p->arg);
                 tag_decrement(thpool_p, job_p->tag);
                 free(job_p->tag);
 				free(job_p);
@@ -500,12 +499,11 @@ thread_do(void *arg)
 
 
 /* Frees a thread  */
-static void thread_destroy (thread* thread_p){
+static void
+thread_destroy (thread* thread_p)
+{
 	free(thread_p);
 }
-
-
-
 
 
 /* ============================ JOB QUEUE =========================== */

@@ -70,7 +70,7 @@ thpool_add_tag(threadpool thpool_p, char *tag, int length,
  * @return nothing
  */
 int thpool_add_work(threadpool, void *(*function_p)(void*), void* arg_p,
-                    char *class_);
+                    char *tag);
 
 
 /**
