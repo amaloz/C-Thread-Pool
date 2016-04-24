@@ -8,7 +8,6 @@
  * 
  ********************************/
 
-#include <assert.h>
 #include <unistd.h>
 #include <signal.h>
 #include <stdio.h>
@@ -17,7 +16,9 @@
 #include <pthread.h>
 #include <errno.h>
 #include <time.h> 
-
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 #include "thpool.h"
 
 #ifdef THPOOL_DEBUG
@@ -25,9 +26,6 @@
 #else
 #define THPOOL_DEBUG 0
 #endif
-
-#define MAX_NANOSEC 999999999
-#define CEIL(X) ((X-(int)(X)) > 0 ? (int)(X+1) : (int)(X))
 
 static volatile int threads_keepalive;
 static volatile int threads_on_hold;
@@ -93,6 +91,7 @@ typedef struct thpool_{
 	volatile int num_threads_alive;      /* threads currently alive   */
 	volatile int num_threads_working;    /* threads currently working */
 	pthread_mutex_t  thcount_lock;       /* used for thread count etc */
+	pthread_cond_t  threads_all_idle;    /* signal to thpool_wait     */
 	jobqueue*  jobqueue_p;               /* pointer to the job queue  */
     taglist* tlist;
 } thpool_;
@@ -101,9 +100,9 @@ typedef struct thpool_{
 /* ========================== PROTOTYPES ============================ */
 
 
-static void  thread_init(thpool_* thpool_p, struct thread** thread_p, int id);
-static void* thread_do(void *arg);
-static void  thread_hold(int);
+static int  thread_init(thpool_* thpool_p, struct thread** thread_p, int id);
+static void* thread_do(struct thread* thread_p);
+static void  thread_hold();
 static void  thread_destroy(struct thread* thread_p);
 
 static int   jobqueue_init(thpool_* thpool_p);
@@ -129,7 +128,7 @@ thpool_init(int num_threads)
 	threads_on_hold   = 0;
 	threads_keepalive = 1;
 
-	if (num_threads < 0) {
+	if (num_threads < 0){
 		num_threads = 0;
 	}
 
@@ -151,7 +150,7 @@ thpool_init(int num_threads)
 	}
 
 	/* Make threads in pool */
-	thpool_p->threads = (struct thread**)malloc(num_threads * sizeof(struct thread));
+	thpool_p->threads = (struct thread**)malloc(num_threads * sizeof(struct thread *));
 	if (thpool_p->threads == NULL){
 		fprintf(stderr, "thpool_init(): Could not allocate memory for threads\n");
 		jobqueue_destroy(thpool_p);
@@ -186,6 +185,7 @@ thpool_init(int num_threads)
     thpool_p->tlist = tlist;
 
 	pthread_mutex_init(&(thpool_p->thcount_lock), NULL);
+	pthread_cond_init(&thpool_p->threads_all_idle, NULL);
 	
 	/* Thread init */
 	for (int n = 0; n < num_threads; n++) {
@@ -220,7 +220,6 @@ thpool_add_tag(thpool_ *thpool_p, char *tag, int length,
     }
 
     fprintf(stderr, "thpool_add_tag(): tag list full!\n");
-    assert(0);
     return -1;
 }
 
@@ -233,7 +232,6 @@ tag_decrement(thpool_ *thpool_p, char *tag)
         struct tag *t = &thpool_p->tlist->tags[i];
         if (strcmp(t->name, tag) == 0) {
             t->len--;
-            assert(t->len >= 0);
             if (t->len == 0) {
                 t->function(t->arg);
             }
@@ -241,7 +239,6 @@ tag_decrement(thpool_ *thpool_p, char *tag)
         }
     }
     fprintf(stderr, "tag_decrement(): tag does not exist in tag list\n");
-    assert(0);
     return -1;
 }
 
@@ -275,55 +272,20 @@ thpool_add_work(thpool_* thpool_p, void *(*function_p)(void*), void* arg_p,
 
 
 /* Wait until all jobs have finished */
-void
-thpool_wait(thpool_* thpool_p)
-{
-	/* Continuous polling */
-	double timeout = 1.0;
-	time_t start, end;
-	double tpassed = 0.0;
-	time (&start);
-	while (tpassed < timeout && 
-			(thpool_p->jobqueue_p->len || thpool_p->num_threads_working))
-	{
-		time(&end);
-		tpassed = difftime(end,start);
+void thpool_wait(thpool_* thpool_p){
+	pthread_mutex_lock(&thpool_p->thcount_lock);
+	while (thpool_p->jobqueue_p->len || thpool_p->num_threads_working) {
+		pthread_cond_wait(&thpool_p->threads_all_idle, &thpool_p->thcount_lock);
 	}
-
-	/* Exponential polling */
-	long init_nano =  1; /* MUST be above 0 */
-	long new_nano;
-	double multiplier =  1.01;
-	int  max_secs   = 20;
-	
-	struct timespec polling_interval;
-	polling_interval.tv_sec  = 0;
-	polling_interval.tv_nsec = init_nano;
-	
-	while (thpool_p->jobqueue_p->len || thpool_p->num_threads_working)
-	{
-		nanosleep(&polling_interval, NULL);
-		if ( polling_interval.tv_sec < max_secs ){
-			new_nano = CEIL(polling_interval.tv_nsec * multiplier);
-			polling_interval.tv_nsec = new_nano % MAX_NANOSEC;
-			if ( new_nano > MAX_NANOSEC ) {
-				polling_interval.tv_sec ++;
-			}
-		}
-		else break;
-	}
-	
-	/* Fall back to max polling */
-	while (thpool_p->jobqueue_p->len || thpool_p->num_threads_working){
-		sleep(max_secs);
-	}
+	pthread_mutex_unlock(&thpool_p->thcount_lock);
 }
 
 
 /* Destroy the threadpool */
-void
-thpool_destroy(thpool_* thpool_p)
-{
+void thpool_destroy(thpool_* thpool_p){
+	/* No need to destory if it's NULL */
+	if (thpool_p == NULL) return ;
+
 	volatile int threads_total = thpool_p->num_threads_alive;
 
 	/* End each thread's infinite loop */
@@ -384,15 +346,14 @@ thpool_resume(thpool_* thpool_p)
  * 
  * @param thread        address to the pointer of the thread to be created
  * @param id            id to be given to the thread
- * 
+ * @return 0 on success, -1 otherwise.
  */
-static void
-thread_init(thpool_* thpool_p, struct thread** thread_p, int id)
-{
-	*thread_p = (struct thread*) malloc(sizeof(struct thread));
-	if (thread_p == NULL) {
+static int thread_init (thpool_* thpool_p, struct thread** thread_p, int id){
+	
+	*thread_p = (struct thread*)malloc(sizeof(struct thread));
+	if (thread_p == NULL){
 		fprintf(stderr, "thpool_init(): Could not allocate memory for thread\n");
-		exit(1);
+		return -1;
 	}
 
 	(*thread_p)->thpool_p = thpool_p;
@@ -400,7 +361,7 @@ thread_init(thpool_* thpool_p, struct thread** thread_p, int id)
 
 	pthread_create(&(*thread_p)->pthread, NULL, thread_do, (*thread_p));
 	pthread_detach((*thread_p)->pthread);
-	
+	return 0;
 }
 
 
@@ -424,15 +385,28 @@ thread_hold (int num)
 * @return nothing
 */
 static void *
-thread_do(void *arg)
+thread_do(struct thread* thread_p)
 {
-    struct thread *thread_p = (struct thread *) arg;
+	/* Set thread name for profiling and debuging */
+	char thread_name[128] = {0};
+	sprintf(thread_name, "thread-pool-%d", thread_p->id);
+
+#if defined(__linux__)
+	/* Use prctl instead to prevent using _GNU_SOURCE flag and implicit declaration */
+	prctl(PR_SET_NAME, thread_name);
+#elif defined(__APPLE__) && defined(__MACH__)
+	pthread_setname_np(thread_name);
+#else
+	fprintf(stderr, "thread_do(): pthread_setname_np is not supported on this system");
+#endif
 
 	/* Assure all threads have been created before starting serving */
 	thpool_ *thpool_p = thread_p->thpool_p;
 	
 	/* Register signal handler */
 	struct sigaction act;
+	sigemptyset(&act.sa_mask);
+	act.sa_flags = 0;
 	act.sa_handler = thread_hold;
 	if (sigaction(SIGUSR1, &act, NULL) == -1) {
 		fprintf(stderr, "thread_do(): cannot handle SIGUSR1");
@@ -468,6 +442,9 @@ thread_do(void *arg)
 			
 			pthread_mutex_lock(&thpool_p->thcount_lock);
 			thpool_p->num_threads_working--;
+			if (!thpool_p->num_threads_working) {
+				pthread_cond_signal(&thpool_p->threads_all_idle);
+			}
 			pthread_mutex_unlock(&thpool_p->thcount_lock);
 
 		}

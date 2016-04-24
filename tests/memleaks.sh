@@ -10,7 +10,6 @@
 
 # ---------------------------- Tests -----------------------------------
 
-
 function test_thread_free { #threads
 	echo "Testing creation and destruction of threads(=$1)"
 	compile src/no_work.c
@@ -55,6 +54,7 @@ function test_thread_free_multi { #threads #times
 
 
 # Run tests
+assure_installed_valgrind
 test_thread_free 1
 test_thread_free 2
 test_thread_free 4

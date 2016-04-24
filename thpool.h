@@ -67,7 +67,7 @@ thpool_add_tag(threadpool thpool_p, char *tag, int length,
  * @param  threadpool    threadpool to which the work will be added
  * @param  function_p    pointer to function to add as work
  * @param  arg_p         pointer to an argument
- * @return nothing
+ * @return 0 on successs, -1 otherwise.
  */
 int thpool_add_work(threadpool, void *(*function_p)(void*), void* arg_p,
                     char *tag);
